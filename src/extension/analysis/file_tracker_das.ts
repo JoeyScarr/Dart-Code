@@ -1,5 +1,5 @@
 import { CancellationToken, Disposable, TextDocument, Uri, window, workspace } from "vscode";
-import { FlutterOutline, FoldingRegion, Occurrences, Outline } from "../../shared/analysis_server_types";
+import { AnalysisGetNavigationResponse, AnalysisNavigationNotification, FilePath, FlutterOutline, FoldingRegion, Occurrences, Outline } from "../../shared/analysis_server_types";
 import { IAmDisposable, Logger } from "../../shared/interfaces";
 import { disposeAll } from "../../shared/utils";
 import { fsPath } from "../../shared/utils/fs";
@@ -11,6 +11,7 @@ import { DasAnalyzerClient } from "./analyzer_das";
 
 export class DasFileTracker implements IAmDisposable {
 	private disposables: Disposable[] = [];
+	private readonly navigations: { [key: string]: AnalysisNavigationNotification } = {};
 	private readonly outlines: { [key: string]: Outline } = {};
 	private readonly flutterOutlines: { [key: string]: FlutterOutline } = {};
 	private readonly occurrences: { [key: string]: Occurrences[] } = {};
@@ -38,6 +39,7 @@ export class DasFileTracker implements IAmDisposable {
 			await this.updateSubscriptions();
 		}));
 		this.disposables.push(window.onDidChangeVisibleTextEditors((e) => this.updatePriorityFiles()));
+		this.disposables.push(this.analyzer.registerForAnalysisNavigation((n) => this.navigations[n.file] = n));
 		this.disposables.push(this.analyzer.registerForAnalysisOutline((o) => this.outlines[o.file] = o.outline));
 		this.disposables.push(this.analyzer.registerForFlutterOutline((o) => this.flutterOutlines[o.file] = o.outline));
 		this.disposables.push(this.analyzer.registerForAnalysisOccurrences((o) => this.occurrences[o.file] = o.occurrences));
@@ -72,7 +74,7 @@ export class DasFileTracker implements IAmDisposable {
 	}
 
 	public async updateSubscriptions(force = false) {
-		const openFiles = this.validPathsFor(workspace.textDocuments);
+		const openFiles = this.validPathsFor(window.visibleTextEditors.map((editor) => editor.document));
 
 		if (!force && !this.pathsHaveChanged(this.lastSubscribedFiles, openFiles))
 			return;
@@ -86,6 +88,7 @@ export class DasFileTracker implements IAmDisposable {
 				subscriptions: {
 					CLOSING_LABELS: this.analyzer.capabilities.supportsClosingLabels ? openFiles : undefined,
 					FOLDING: this.wsContext.config.useLsp ? undefined : openFiles,
+					NAVIGATION: this.wsContext.config.useLsp ? undefined : openFiles,
 					OCCURRENCES: this.wsContext.config.useLsp ? undefined : openFiles,
 					OUTLINE: openFiles,
 				},
@@ -121,6 +124,17 @@ export class DasFileTracker implements IAmDisposable {
 			.filter((doc) => !doc.isClosed && isAnalyzeable(doc))
 			.map((doc) => fsPath(doc.uri))
 			.sort((path1, path2) => path1.localeCompare(path2));
+	}
+
+	public getNavigationTargets(file: FilePath, offset: number): AnalysisGetNavigationResponse | undefined {
+		const notification = this.navigations[file];
+		const region = notification?.regions?.find((value) => value.offset <= offset && value.offset + value.length > offset);
+		if (!region) return undefined;
+		return {
+			files: notification.files,
+			regions: [region],
+			targets: notification.targets,
+		};
 	}
 
 	public getOutlineFor(file: Uri): Outline | undefined {
